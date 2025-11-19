@@ -1,0 +1,7 @@
+.git
+# .env
+*.exe
+jazz-api
+jazz-migrate
+.DS_Store
+*.log

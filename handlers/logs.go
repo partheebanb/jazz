@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"jazz/database"
 	"jazz/models"
 	"time"
 
@@ -14,36 +15,44 @@ func HealthCheck(c *gin.Context) {
 	})
 }
 
-func IngestLogs(c *gin.Context) {
-	var logs []models.LogEntry
-	if err := c.ShouldBindJSON(&logs); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
+func IngestLogs(db *database.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var logs []models.LogEntry
+		if err := c.ShouldBindJSON(&logs); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
 
-	c.JSON(201, gin.H{
-		"message": "logs received",
-		"count":   len(logs),
-	})
+		for i := range logs {
+			logs[i].ID = uuid.New()
+			if logs[i].Timestamp.IsZero() {
+				logs[i].Timestamp = time.Now()
+			}
+
+			if err := db.InsertLog(logs[i]); err != nil {
+				c.JSON(500, gin.H{"error": "failed to insert log"})
+				return
+			}
+		}
+
+		c.JSON(201, gin.H{
+			"message": "logs stored",
+			"count":   len(logs),
+		})
+	}
 }
 
-func GetLogs(c *gin.Context) {
-	mockLogs := []models.LogEntry{
-		{
-			ID:        uuid.New(),
-			Level:     "error",
-			Message:   "Database connection failed",
-			Timestamp: time.Now(),
-		},
-		{
-			ID:        uuid.New(),
-			Level:     "info",
-			Message:   "Server started successfully",
-			Timestamp: time.Now(),
-		},
-	}
+func GetLogs(db *database.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		logs, err := db.GetLogs()
+		if err != nil {
+			c.JSON(500, gin.H{"error": "failed to retrieve logs"})
+			return
+		}
 
-	c.JSON(200, gin.H{
-		"logs": mockLogs,
-	})
+		c.JSON(200, gin.H{
+			"logs":  logs,
+			"count": len(logs),
+		})
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -44,7 +45,7 @@ func (db *DB) InsertLog(log models.LogEntry) error {
 	return err
 }
 
-func (db *DB) QueryLogs(params models.QueryParams) ([]models.LogEntry, int64, error) {
+func (db *DB) QueryLogs(ctx context.Context, params models.QueryParams) ([]models.LogEntry, int64, error) {
 	// Build WHERE clause dynamically
 	conditions := []string{}
 	args := []interface{}{}
@@ -96,7 +97,7 @@ func (db *DB) QueryLogs(params models.QueryParams) ([]models.LogEntry, int64, er
 	// Count total
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM logs %s", whereClause)
 	var total int64
-	err := db.Pool.QueryRow(context.Background(), countQuery, args...).Scan(&total)
+	err := db.Pool.QueryRow(ctx, countQuery, args...).Scan(&total)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -112,13 +113,13 @@ func (db *DB) QueryLogs(params models.QueryParams) ([]models.LogEntry, int64, er
 
 	args = append(args, params.Limit, params.Offset)
 
-	rows, err := db.Pool.Query(context.Background(), query, args...)
+	rows, err := db.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
 
-	var logs []models.LogEntry
+	logs := []models.LogEntry{} // Initialize as empty slice, not nil
 	for rows.Next() {
 		var log models.LogEntry
 		err := rows.Scan(&log.ID, &log.Level, &log.Message, &log.Source, &log.Timestamp)
@@ -129,4 +130,31 @@ func (db *DB) QueryLogs(params models.QueryParams) ([]models.LogEntry, int64, er
 	}
 
 	return logs, total, nil
+}
+func (db *DB) InsertLogsBatch(ctx context.Context, logs []models.LogEntry) error {
+	if len(logs) == 0 {
+		return nil
+	}
+
+	query := `
+		INSERT INTO logs (id, level, message, source, timestamp)
+		VALUES ($1, $2, $3, $4, $5)
+	`
+
+	batch := &pgx.Batch{}
+	for _, log := range logs {
+		batch.Queue(query, log.ID, log.Level, log.Message, log.Source, log.Timestamp)
+	}
+
+	results := db.Pool.SendBatch(ctx, batch)
+	defer results.Close()
+
+	for i := 0; i < len(logs); i++ {
+		_, err := results.Exec()
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

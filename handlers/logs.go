@@ -3,39 +3,57 @@ package handlers
 import (
 	"jazz/database"
 	"jazz/models"
+	"log"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
+const (
+	maxBatchSize = 1000
+	minBatchSize = 1
+)
+
 func HealthCheck(c *gin.Context) {
-	c.JSON(200, gin.H{
-		"status": "ok",
-	})
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 func IngestLogs(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var logs []models.LogEntry
 		if err := c.ShouldBindJSON(&logs); err != nil {
-			c.JSON(400, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
+		if len(logs) < minBatchSize || len(logs) > maxBatchSize {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "batch size must be between 1 and 1000",
+			})
+			return
+		}
+
+		now := time.Now()
 		for i := range logs {
 			logs[i].ID = uuid.New()
 			if logs[i].Timestamp.IsZero() {
-				logs[i].Timestamp = time.Now()
-			}
-
-			if err := db.InsertLog(logs[i]); err != nil {
-				c.JSON(500, gin.H{"error": "failed to insert log"})
-				return
+				logs[i].Timestamp = now
 			}
 		}
 
-		c.JSON(201, gin.H{
+		ctx := c.Request.Context()
+		if err := db.InsertLogsBatch(ctx, logs); err != nil {
+			log.Printf("failed to insert logs: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "failed to store logs",
+			})
+			return
+		}
+
+		log.Printf("ingested %d logs", len(logs))
+		c.JSON(http.StatusCreated, gin.H{
 			"message": "logs stored",
 			"count":   len(logs),
 		})
@@ -46,13 +64,28 @@ func GetLogs(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var params models.QueryParams
 		if err := c.ShouldBindQuery(&params); err != nil {
-			c.JSON(400, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		logs, total, err := db.QueryLogs(params)
+		// Set defaults and limits
+		if params.Limit <= 0 {
+			params.Limit = 50
+		}
+		if params.Limit > 1000 {
+			params.Limit = 1000
+		}
+		if params.Offset < 0 {
+			params.Offset = 0
+		}
+
+		ctx := c.Request.Context()
+		logs, total, err := db.QueryLogs(ctx, params)
 		if err != nil {
-			c.JSON(500, gin.H{"error": "failed to query logs"})
+			log.Printf("failed to query logs: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "failed to retrieve logs",
+			})
 			return
 		}
 
@@ -64,6 +97,6 @@ func GetLogs(db *database.DB) gin.HandlerFunc {
 			HasMore: int64(params.Offset+params.Limit) < total,
 		}
 
-		c.JSON(200, response)
+		c.JSON(http.StatusOK, response)
 	}
 }

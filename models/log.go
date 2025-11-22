@@ -8,6 +8,7 @@ import (
 
 type LogEntry struct {
 	ID        uuid.UUID `json:"id"`
+	ProjectID uuid.UUID `json:"project_id"`
 	Level     string    `json:"level" binding:"required"`
 	Message   string    `json:"message" binding:"required"`
 	Source    string    `json:"source"`

@@ -26,6 +26,13 @@ func HealthCheck(c *gin.Context) {
 
 func IngestLogs(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Get project from auth middleware
+		projectID, exists := c.Get("project_id")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+
 		var logs []models.LogEntry
 		if err := c.ShouldBindJSON(&logs); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -42,6 +49,7 @@ func IngestLogs(db *database.DB) gin.HandlerFunc {
 		now := time.Now()
 		for i := range logs {
 			logs[i].ID = uuid.New()
+			logs[i].ProjectID = projectID.(uuid.UUID)
 			if logs[i].Timestamp.IsZero() {
 				logs[i].Timestamp = now
 			}
@@ -56,7 +64,7 @@ func IngestLogs(db *database.DB) gin.HandlerFunc {
 			return
 		}
 
-		log.Printf("ingested %d logs", len(logs))
+		log.Printf("ingested %d logs for project %s", len(logs), projectID)
 		c.JSON(http.StatusCreated, gin.H{
 			"message": "logs stored",
 			"count":   len(logs),
@@ -66,13 +74,18 @@ func IngestLogs(db *database.DB) gin.HandlerFunc {
 
 func GetLogs(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		projectID, exists := c.Get("project_id")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+
 		var params models.QueryParams
 		if err := c.ShouldBindQuery(&params); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		// Set defaults and limits
 		if params.Limit <= 0 {
 			params.Limit = defaultLimit
 		}
@@ -84,7 +97,7 @@ func GetLogs(db *database.DB) gin.HandlerFunc {
 		}
 
 		ctx := c.Request.Context()
-		logs, total, err := db.QueryLogs(ctx, params)
+		logs, total, err := db.QueryLogs(ctx, projectID.(uuid.UUID), params)
 		if err != nil {
 			log.Printf("failed to query logs: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -61,16 +62,16 @@ func Connect(ctx context.Context, databaseURL string) (*DB, error) {
 
 // QueryLogs retrieves logs with filtering and pagination
 // Uses COUNT(*) OVER() to get total count in single query
-func (db *DB) QueryLogs(ctx context.Context, params models.QueryParams) ([]models.LogEntry, int64, error) {
+func (db *DB) QueryLogs(ctx context.Context, projectID uuid.UUID, params models.QueryParams) ([]models.LogEntry, int64, error) {
 	start := time.Now()
 	defer func() {
-		log.Printf("QueryLogs: duration=%v filters=[level=%s source=%s]",
-			time.Since(start), params.Level, params.Source)
+		log.Printf("QueryLogs: duration=%v project=%s filters=[level=%s source=%s]",
+			time.Since(start), projectID, params.Level, params.Source)
 	}()
 
-	conditions := []string{}
-	args := []interface{}{}
-	argCount := 1
+	conditions := []string{"project_id = $1"}
+	args := []interface{}{projectID}
+	argCount := 2
 
 	if params.Level != "" {
 		conditions = append(conditions, fmt.Sprintf("%s = $%d", columnLevel, argCount))
@@ -104,17 +105,11 @@ func (db *DB) QueryLogs(ctx context.Context, params models.QueryParams) ([]model
 		argCount++
 	}
 
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = "WHERE " + strings.Join(conditions, " AND ")
-	}
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
 
-	// Single query with COUNT(*) OVER() to avoid N+1 problem
-	// SAFETY: All user input is parameterized via $N placeholders.
-	// whereClause only contains safe column names and SQL operators.
 	query := fmt.Sprintf(`
 		SELECT 
-			%s, %s, %s, %s, %s,
+			%s, project_id, %s, %s, %s, %s,
 			COUNT(*) OVER() as total_count
 		FROM logs
 		%s
@@ -138,6 +133,7 @@ func (db *DB) QueryLogs(ctx context.Context, params models.QueryParams) ([]model
 		var log models.LogEntry
 		err := rows.Scan(
 			&log.ID,
+			&log.ProjectID,
 			&log.Level,
 			&log.Message,
 			&log.Source,
@@ -167,14 +163,14 @@ func (db *DB) InsertLogsBatch(ctx context.Context, logs []models.LogEntry) error
 		log.Printf("InsertLogsBatch: duration=%v count=%d", time.Since(start), len(logs))
 	}()
 
-	query := fmt.Sprintf(`
-		INSERT INTO logs (%s, %s, %s, %s, %s)
-		VALUES ($1, $2, $3, $4, $5)
-	`, columnID, columnLevel, columnMessage, columnSource, columnTimestamp)
+	query := `
+		INSERT INTO logs (id, project_id, level, message, source, timestamp)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
 
 	batch := &pgx.Batch{}
 	for _, log := range logs {
-		batch.Queue(query, log.ID, log.Level, log.Message, log.Source, log.Timestamp)
+		batch.Queue(query, log.ID, log.ProjectID, log.Level, log.Message, log.Source, log.Timestamp)
 	}
 
 	results := db.Pool.SendBatch(ctx, batch)
@@ -197,4 +193,144 @@ func (db *DB) InsertLogsBatch(ctx context.Context, logs []models.LogEntry) error
 func (db *DB) Close() {
 	db.Pool.Close()
 	log.Println("Database connection closed")
+}
+
+// GetProjectByAPIKey validates an API key and returns the project
+func (db *DB) GetProjectByAPIKey(ctx context.Context, apiKey string) (*models.Project, error) {
+	query := `
+		SELECT id, name, api_key, created_at, updated_at
+		FROM projects
+		WHERE api_key = $1
+	`
+
+	var project models.Project
+	err := db.Pool.QueryRow(ctx, query, apiKey).Scan(
+		&project.ID,
+		&project.Name,
+		&project.APIKey,
+		&project.CreatedAt,
+		&project.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("invalid API key")
+		}
+		return nil, fmt.Errorf("failed to get project: %w", err)
+	}
+
+	return &project, nil
+}
+
+// CreateProject creates a new project with a generated API key
+func (db *DB) CreateProject(ctx context.Context, name string) (*models.Project, error) {
+	apiKey := generateAPIKey()
+
+	query := `
+		INSERT INTO projects (name, api_key)
+		VALUES ($1, $2)
+		RETURNING id, name, api_key, created_at, updated_at
+	`
+
+	var project models.Project
+	err := db.Pool.QueryRow(ctx, query, name, apiKey).Scan(
+		&project.ID,
+		&project.Name,
+		&project.APIKey,
+		&project.CreatedAt,
+		&project.UpdatedAt,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create project: %w", err)
+	}
+
+	log.Printf("Created project: %s (ID: %s)", project.Name, project.ID)
+	return &project, nil
+}
+
+// ListProjects returns all projects
+func (db *DB) ListProjects(ctx context.Context) ([]models.Project, error) {
+	query := `
+		SELECT id, name, api_key, created_at, updated_at
+		FROM projects
+		ORDER BY created_at DESC
+	`
+
+	rows, err := db.Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list projects: %w", err)
+	}
+	defer rows.Close()
+
+	projects := []models.Project{}
+	for rows.Next() {
+		var project models.Project
+		err := rows.Scan(
+			&project.ID,
+			&project.Name,
+			&project.APIKey,
+			&project.CreatedAt,
+			&project.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan project: %w", err)
+		}
+		projects = append(projects, project)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating projects: %w", err)
+	}
+
+	return projects, nil
+}
+
+// GetProject returns a project by ID
+func (db *DB) GetProject(ctx context.Context, projectID uuid.UUID) (*models.Project, error) {
+	query := `
+		SELECT id, name, api_key, created_at, updated_at
+		FROM projects
+		WHERE id = $1
+	`
+
+	var project models.Project
+	err := db.Pool.QueryRow(ctx, query, projectID).Scan(
+		&project.ID,
+		&project.Name,
+		&project.APIKey,
+		&project.CreatedAt,
+		&project.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("project not found")
+		}
+		return nil, fmt.Errorf("failed to get project: %w", err)
+	}
+
+	return &project, nil
+}
+
+// DeleteProject deletes a project (cascades to logs)
+func (db *DB) DeleteProject(ctx context.Context, projectID uuid.UUID) error {
+	query := `DELETE FROM projects WHERE id = $1`
+
+	result, err := db.Pool.Exec(ctx, query, projectID)
+	if err != nil {
+		return fmt.Errorf("failed to delete project: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("project not found")
+	}
+
+	log.Printf("Deleted project: %s", projectID)
+	return nil
+}
+
+// generateAPIKey generates a secure random API key
+func generateAPIKey() string {
+	return fmt.Sprintf("jazz_%s", uuid.New().String())
 }

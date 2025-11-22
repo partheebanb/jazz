@@ -4,6 +4,7 @@ import (
 	"context"
 	"jazz/database"
 	"jazz/handlers"
+	"jazz/middleware"
 	"log"
 	"os"
 	"time"
@@ -20,7 +21,6 @@ func main() {
 		log.Fatal("DATABASE_URL not set")
 	}
 
-	// Create context with timeout for initial connection
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -33,8 +33,20 @@ func main() {
 	r := gin.Default()
 
 	r.GET("/health", handlers.HealthCheck)
-	r.POST("/logs", handlers.IngestLogs(db))
-	r.GET("/logs", handlers.GetLogs(db))
+
+	// Public project endpoints (no auth required for creation)
+	r.POST("/projects", handlers.CreateProject(db))
+	r.GET("/projects", handlers.ListProjects(db))
+	r.GET("/projects/:id", handlers.GetProject(db))
+	r.DELETE("/projects/:id", handlers.DeleteProject(db))
+
+	// Protected log endpoints (require API key)
+	protected := r.Group("")
+	protected.Use(middleware.AuthRequired(db))
+	{
+		protected.POST("/logs", handlers.IngestLogs(db))
+		protected.GET("/logs", handlers.GetLogs(db))
+	}
 
 	log.Println("Server starting on :8080")
 	r.Run(":8080")

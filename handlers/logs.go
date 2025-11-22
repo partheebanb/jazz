@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"jazz/database"
 	"jazz/models"
 	"log"
@@ -12,8 +13,11 @@ import (
 )
 
 const (
-	maxBatchSize = 1000
-	minBatchSize = 1
+	maxBatchSize  = 1000
+	minBatchSize  = 1
+	defaultLimit  = 50
+	maxLimit      = 1000
+	defaultOffset = 0
 )
 
 func HealthCheck(c *gin.Context) {
@@ -30,7 +34,7 @@ func IngestLogs(db *database.DB) gin.HandlerFunc {
 
 		if len(logs) < minBatchSize || len(logs) > maxBatchSize {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "batch size must be between 1 and 1000",
+				"error": fmt.Sprintf("batch size must be between %d and %d", minBatchSize, maxBatchSize),
 			})
 			return
 		}
@@ -70,13 +74,13 @@ func GetLogs(db *database.DB) gin.HandlerFunc {
 
 		// Set defaults and limits
 		if params.Limit <= 0 {
-			params.Limit = 50
+			params.Limit = defaultLimit
 		}
-		if params.Limit > 1000 {
-			params.Limit = 1000
+		if params.Limit > maxLimit {
+			params.Limit = maxLimit
 		}
 		if params.Offset < 0 {
-			params.Offset = 0
+			params.Offset = defaultOffset
 		}
 
 		ctx := c.Request.Context()

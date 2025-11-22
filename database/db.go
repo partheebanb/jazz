@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"jazz/models"
+	"log"
 	"strings"
 	"time"
 
@@ -11,74 +12,96 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	columnID        = "id"
+	columnLevel     = "level"
+	columnMessage   = "message"
+	columnSource    = "source"
+	columnTimestamp = "timestamp"
+)
+
 type DB struct {
 	Pool *pgxpool.Pool
 }
 
-func Connect(databaseURL string) (*DB, error) {
-	pool, err := pgxpool.New(context.Background(), databaseURL)
+type BatchInsertError struct {
+	FailedIndex int
+	TotalLogs   int
+	Err         error
+}
+
+func (e *BatchInsertError) Error() string {
+	return fmt.Sprintf("failed to insert log at index %d/%d: %v", e.FailedIndex, e.TotalLogs, e.Err)
+}
+
+func Connect(ctx context.Context, databaseURL string) (*DB, error) {
+	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse database URL: %w", err)
 	}
 
-	if err := pool.Ping(context.Background()); err != nil {
-		return nil, err
+	config.MaxConns = 25
+	config.MinConns = 5
+	config.MaxConnLifetime = time.Hour
+	config.MaxConnIdleTime = 30 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection pool: %w", err)
 	}
 
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	log.Println("Database connection established")
 	return &DB{Pool: pool}, nil
 }
 
-func (db *DB) InsertLog(log models.LogEntry) error {
-	query := `
-		INSERT INTO logs (id, level, message, source, timestamp)
-		VALUES ($1, $2, $3, $4, $5)
-	`
-	_, err := db.Pool.Exec(
-		context.Background(),
-		query,
-		log.ID,
-		log.Level,
-		log.Message,
-		log.Source,
-		log.Timestamp,
-	)
-	return err
-}
-
+// QueryLogs retrieves logs with filtering and pagination
+// Uses COUNT(*) OVER() to get total count in single query
 func (db *DB) QueryLogs(ctx context.Context, params models.QueryParams) ([]models.LogEntry, int64, error) {
-	// Build WHERE clause dynamically
+	start := time.Now()
+	defer func() {
+		log.Printf("QueryLogs: duration=%v filters=[level=%s source=%s]",
+			time.Since(start), params.Level, params.Source)
+	}()
+
 	conditions := []string{}
 	args := []interface{}{}
 	argCount := 1
 
 	if params.Level != "" {
-		conditions = append(conditions, fmt.Sprintf("level = $%d", argCount))
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", columnLevel, argCount))
 		args = append(args, params.Level)
 		argCount++
 	}
 
 	if params.Source != "" {
-		conditions = append(conditions, fmt.Sprintf("source = $%d", argCount))
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", columnSource, argCount))
 		args = append(args, params.Source)
 		argCount++
 	}
 
 	if params.StartTime != "" {
 		startTime, err := time.Parse(time.RFC3339, params.StartTime)
-		if err == nil {
-			conditions = append(conditions, fmt.Sprintf("timestamp >= $%d", argCount))
-			args = append(args, startTime)
-			argCount++
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid start_time format (expected RFC3339): %w", err)
 		}
+		conditions = append(conditions, fmt.Sprintf("%s >= $%d", columnTimestamp, argCount))
+		args = append(args, startTime)
+		argCount++
 	}
 
 	if params.EndTime != "" {
 		endTime, err := time.Parse(time.RFC3339, params.EndTime)
-		if err == nil {
-			conditions = append(conditions, fmt.Sprintf("timestamp <= $%d", argCount))
-			args = append(args, endTime)
-			argCount++
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid end_time format (expected RFC3339): %w", err)
 		}
+		conditions = append(conditions, fmt.Sprintf("%s <= $%d", columnTimestamp, argCount))
+		args = append(args, endTime)
+		argCount++
 	}
 
 	whereClause := ""
@@ -86,60 +109,68 @@ func (db *DB) QueryLogs(ctx context.Context, params models.QueryParams) ([]model
 		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	// Set defaults
-	if params.Limit == 0 {
-		params.Limit = 50
-	}
-	if params.Limit > 1000 {
-		params.Limit = 1000
-	}
-
-	// Count total
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM logs %s", whereClause)
-	var total int64
-	err := db.Pool.QueryRow(ctx, countQuery, args...).Scan(&total)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Get logs
+	// Single query with COUNT(*) OVER() to avoid N+1 problem
+	// SAFETY: All user input is parameterized via $N placeholders.
+	// whereClause only contains safe column names and SQL operators.
 	query := fmt.Sprintf(`
-		SELECT id, level, message, source, timestamp
+		SELECT 
+			%s, %s, %s, %s, %s,
+			COUNT(*) OVER() as total_count
 		FROM logs
 		%s
-		ORDER BY timestamp DESC
+		ORDER BY %s DESC
 		LIMIT $%d OFFSET $%d
-	`, whereClause, argCount, argCount+1)
+	`, columnID, columnLevel, columnMessage, columnSource, columnTimestamp,
+		whereClause, columnTimestamp, argCount, argCount+1)
 
 	args = append(args, params.Limit, params.Offset)
 
 	rows, err := db.Pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("failed to query logs: %w", err)
 	}
 	defer rows.Close()
 
-	logs := []models.LogEntry{} // Initialize as empty slice, not nil
+	logs := []models.LogEntry{}
+	var total int64
+
 	for rows.Next() {
 		var log models.LogEntry
-		err := rows.Scan(&log.ID, &log.Level, &log.Message, &log.Source, &log.Timestamp)
+		err := rows.Scan(
+			&log.ID,
+			&log.Level,
+			&log.Message,
+			&log.Source,
+			&log.Timestamp,
+			&total,
+		)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("failed to scan log row: %w", err)
 		}
 		logs = append(logs, log)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+	}
+
 	return logs, total, nil
 }
+
 func (db *DB) InsertLogsBatch(ctx context.Context, logs []models.LogEntry) error {
 	if len(logs) == 0 {
 		return nil
 	}
 
-	query := `
-		INSERT INTO logs (id, level, message, source, timestamp)
+	start := time.Now()
+	defer func() {
+		log.Printf("InsertLogsBatch: duration=%v count=%d", time.Since(start), len(logs))
+	}()
+
+	query := fmt.Sprintf(`
+		INSERT INTO logs (%s, %s, %s, %s, %s)
 		VALUES ($1, $2, $3, $4, $5)
-	`
+	`, columnID, columnLevel, columnMessage, columnSource, columnTimestamp)
 
 	batch := &pgx.Batch{}
 	for _, log := range logs {
@@ -152,9 +183,18 @@ func (db *DB) InsertLogsBatch(ctx context.Context, logs []models.LogEntry) error
 	for i := 0; i < len(logs); i++ {
 		_, err := results.Exec()
 		if err != nil {
-			return err
+			return &BatchInsertError{
+				FailedIndex: i,
+				TotalLogs:   len(logs),
+				Err:         err,
+			}
 		}
 	}
 
 	return nil
+}
+
+func (db *DB) Close() {
+	db.Pool.Close()
+	log.Println("Database connection closed")
 }

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"jazz/database"
 	"jazz/handlers"
 	"log"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -18,11 +20,15 @@ func main() {
 		log.Fatal("DATABASE_URL not set")
 	}
 
-	db, err := database.Connect(databaseURL)
+	// Create context with timeout for initial connection
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	db, err := database.Connect(ctx, databaseURL)
 	if err != nil {
 		log.Fatal("Failed to connect to database:", err)
 	}
-	defer db.Pool.Close()
+	defer db.Close()
 
 	r := gin.Default()
 

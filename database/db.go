@@ -2,7 +2,10 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"jazz/models"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -26,8 +29,8 @@ func Connect(databaseURL string) (*DB, error) {
 
 func (db *DB) InsertLog(log models.LogEntry) error {
 	query := `
-		INSERT INTO logs (id, level, message, timestamp)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO logs (id, level, message, source, timestamp)
+		VALUES ($1, $2, $3, $4, $5)
 	`
 	_, err := db.Pool.Exec(
 		context.Background(),
@@ -35,33 +38,95 @@ func (db *DB) InsertLog(log models.LogEntry) error {
 		log.ID,
 		log.Level,
 		log.Message,
+		log.Source,
 		log.Timestamp,
 	)
 	return err
 }
 
-func (db *DB) GetLogs() ([]models.LogEntry, error) {
-	query := `
-		SELECT id, level, message, timestamp
-		FROM logs
-		ORDER BY timestamp DESC
-		LIMIT 100
-	`
-	rows, err := db.Pool.Query(context.Background(), query)
+func (db *DB) QueryLogs(params models.QueryParams) ([]models.LogEntry, int64, error) {
+	// Build WHERE clause dynamically
+	conditions := []string{}
+	args := []interface{}{}
+	argCount := 1
+
+	if params.Level != "" {
+		conditions = append(conditions, fmt.Sprintf("level = $%d", argCount))
+		args = append(args, params.Level)
+		argCount++
+	}
+
+	if params.Source != "" {
+		conditions = append(conditions, fmt.Sprintf("source = $%d", argCount))
+		args = append(args, params.Source)
+		argCount++
+	}
+
+	if params.StartTime != "" {
+		startTime, err := time.Parse(time.RFC3339, params.StartTime)
+		if err == nil {
+			conditions = append(conditions, fmt.Sprintf("timestamp >= $%d", argCount))
+			args = append(args, startTime)
+			argCount++
+		}
+	}
+
+	if params.EndTime != "" {
+		endTime, err := time.Parse(time.RFC3339, params.EndTime)
+		if err == nil {
+			conditions = append(conditions, fmt.Sprintf("timestamp <= $%d", argCount))
+			args = append(args, endTime)
+			argCount++
+		}
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// Set defaults
+	if params.Limit == 0 {
+		params.Limit = 50
+	}
+	if params.Limit > 1000 {
+		params.Limit = 1000
+	}
+
+	// Count total
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM logs %s", whereClause)
+	var total int64
+	err := db.Pool.QueryRow(context.Background(), countQuery, args...).Scan(&total)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+
+	// Get logs
+	query := fmt.Sprintf(`
+		SELECT id, level, message, source, timestamp
+		FROM logs
+		%s
+		ORDER BY timestamp DESC
+		LIMIT $%d OFFSET $%d
+	`, whereClause, argCount, argCount+1)
+
+	args = append(args, params.Limit, params.Offset)
+
+	rows, err := db.Pool.Query(context.Background(), query, args...)
+	if err != nil {
+		return nil, 0, err
 	}
 	defer rows.Close()
 
 	var logs []models.LogEntry
 	for rows.Next() {
 		var log models.LogEntry
-		err := rows.Scan(&log.ID, &log.Level, &log.Message, &log.Timestamp)
+		err := rows.Scan(&log.ID, &log.Level, &log.Message, &log.Source, &log.Timestamp)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		logs = append(logs, log)
 	}
 
-	return logs, nil
+	return logs, total, nil
 }

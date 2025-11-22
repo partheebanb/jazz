@@ -44,15 +44,26 @@ func IngestLogs(db *database.DB) gin.HandlerFunc {
 
 func GetLogs(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		logs, err := db.GetLogs()
-		if err != nil {
-			c.JSON(500, gin.H{"error": "failed to retrieve logs"})
+		var params models.QueryParams
+		if err := c.ShouldBindQuery(&params); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
 			return
 		}
 
-		c.JSON(200, gin.H{
-			"logs":  logs,
-			"count": len(logs),
-		})
+		logs, total, err := db.QueryLogs(params)
+		if err != nil {
+			c.JSON(500, gin.H{"error": "failed to query logs"})
+			return
+		}
+
+		response := models.LogsResponse{
+			Logs:    logs,
+			Total:   total,
+			Limit:   params.Limit,
+			Offset:  params.Offset,
+			HasMore: int64(params.Offset+params.Limit) < total,
+		}
+
+		c.JSON(200, response)
 	}
 }

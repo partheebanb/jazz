@@ -65,11 +65,26 @@ func Connect(ctx context.Context, databaseURL string) (*DB, error) {
 func (db *DB) QueryLogs(ctx context.Context, projectID uuid.UUID, params models.QueryParams) ([]models.LogEntry, int64, error) {
 	start := time.Now()
 	defer func() {
-		log.Printf("QueryLogs: duration=%v project=%s filters=[level=%s source=%s]",
-			time.Since(start), projectID, params.Level, params.Source)
+		log.Printf("QueryLogs: duration=%v project=%s filters=[level=%s source=%s search=%s]",
+			time.Since(start), projectID, params.Level, params.Source, params.Search)
 	}()
 
-	conditions := []string{"project_id = $1"}
+	// If search parameter provided, use SearchLogs instead
+	if params.Search != "" {
+		searchReq := models.SearchRequest{
+			Query:     params.Search,
+			Level:     params.Level,
+			Source:    params.Source,
+			StartTime: params.StartTime,
+			EndTime:   params.EndTime,
+			Limit:     params.Limit,
+			Offset:    params.Offset,
+		}
+		return db.SearchLogs(ctx, projectID, searchReq)
+	}
+
+	// ... existing QueryLogs implementation (no changes)
+	conditions := []string{fmt.Sprintf("project_id = $1")}
 	args := []interface{}{projectID}
 	argCount := 2
 
@@ -106,6 +121,13 @@ func (db *DB) QueryLogs(ctx context.Context, projectID uuid.UUID, params models.
 	}
 
 	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
+	if params.Limit == 0 {
+		params.Limit = 50
+	}
+	if params.Limit > 1000 {
+		params.Limit = 1000
+	}
 
 	query := fmt.Sprintf(`
 		SELECT 
@@ -333,4 +355,171 @@ func (db *DB) DeleteProject(ctx context.Context, projectID uuid.UUID) error {
 // generateAPIKey generates a secure random API key
 func generateAPIKey() string {
 	return fmt.Sprintf("jazz_%s", uuid.New().String())
+}
+
+// parseSearchQuery converts user query to PostgreSQL tsquery format
+func parseSearchQuery(query string) (string, error) {
+	query = strings.TrimSpace(query)
+
+	if len(query) < 3 {
+		return "", fmt.Errorf("search query must be at least 3 characters")
+	}
+
+	if len(query) > 1000 {
+		return "", fmt.Errorf("search query too long (max 1000 characters)")
+	}
+
+	// For simplicity in Phase 1, just handle basic AND search
+	// Remove quotes and special characters
+	query = strings.ReplaceAll(query, `"`, "")
+	query = strings.ReplaceAll(query, "'", "")
+	query = strings.ReplaceAll(query, "(", "")
+	query = strings.ReplaceAll(query, ")", "")
+
+	// Split into words and join with &
+	words := strings.Fields(query)
+	if len(words) == 0 {
+		return "", fmt.Errorf("search query is empty")
+	}
+
+	// Filter out very short words
+	var validWords []string
+	for _, word := range words {
+		if len(word) >= 2 {
+			validWords = append(validWords, strings.ToLower(word))
+		}
+	}
+
+	if len(validWords) == 0 {
+		return "", fmt.Errorf("no valid search terms")
+	}
+
+	return strings.Join(validWords, " & "), nil
+}
+
+// pgEscapeSearchTerm escapes special PostgreSQL tsquery characters
+func pgEscapeSearchTerm(term string) string {
+	// Remove potentially problematic characters but keep basic search working
+	term = strings.ReplaceAll(term, "'", "")
+	term = strings.ReplaceAll(term, ":", "")
+	term = strings.ReplaceAll(term, "(", "")
+	term = strings.ReplaceAll(term, ")", "")
+	return term
+}
+
+// SearchLogs performs full-text search on log messages
+func (db *DB) SearchLogs(ctx context.Context, projectID uuid.UUID, req models.SearchRequest) ([]models.LogEntry, int64, error) {
+	start := time.Now()
+	defer func() {
+		duration := time.Since(start).Milliseconds()
+		log.Printf("SearchLogs: project=%s query=%q duration=%dms",
+			projectID, req.Query, duration)
+	}()
+
+	// Parse search query to tsquery format
+	tsQuery, err := parseSearchQuery(req.Query)
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid search query: %w", err)
+	}
+
+	// Build WHERE conditions
+	conditions := []string{
+		"project_id = $1",
+		"to_tsvector('english', message) @@ to_tsquery('english', $2)",
+	}
+	args := []interface{}{projectID, tsQuery}
+	argCount := 3
+
+	if req.Level != "" {
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", columnLevel, argCount))
+		args = append(args, req.Level)
+		argCount++
+	}
+
+	if req.Source != "" {
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", columnSource, argCount))
+		args = append(args, req.Source)
+		argCount++
+	}
+
+	if req.StartTime != "" {
+		startTime, err := time.Parse(time.RFC3339, req.StartTime)
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid start_time format (expected RFC3339): %w", err)
+		}
+		conditions = append(conditions, fmt.Sprintf("%s >= $%d", columnTimestamp, argCount))
+		args = append(args, startTime)
+		argCount++
+	}
+
+	if req.EndTime != "" {
+		endTime, err := time.Parse(time.RFC3339, req.EndTime)
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid end_time format (expected RFC3339): %w", err)
+		}
+		conditions = append(conditions, fmt.Sprintf("%s <= $%d", columnTimestamp, argCount))
+		args = append(args, endTime)
+		argCount++
+	}
+
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
+	// Set defaults
+	if req.Limit == 0 {
+		req.Limit = 50
+	}
+	if req.Limit > 1000 {
+		req.Limit = 1000
+	}
+
+	// Query with ranking
+	// SAFETY: All user input is parameterized. whereClause only contains safe SQL fragments.
+	query := fmt.Sprintf(`
+		SELECT 
+			%s, project_id, %s, %s, %s, %s,
+			ts_rank(to_tsvector('english', message), to_tsquery('english', $2)) as rank,
+			COUNT(*) OVER() as total_count
+		FROM logs
+		%s
+		ORDER BY rank DESC, %s DESC
+		LIMIT $%d OFFSET $%d
+	`, columnID, columnLevel, columnMessage, columnSource, columnTimestamp,
+		whereClause, columnTimestamp, argCount, argCount+1)
+
+	args = append(args, req.Limit, req.Offset)
+
+	rows, err := db.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to search logs: %w", err)
+	}
+	defer rows.Close()
+
+	logs := []models.LogEntry{}
+	var total int64
+
+	for rows.Next() {
+		var log models.LogEntry
+		var rank float64
+		err := rows.Scan(
+			&log.ID,
+			&log.ProjectID,
+			&log.Level,
+			&log.Message,
+			&log.Source,
+			&log.Timestamp,
+			&rank,
+			&total,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan search result: %w", err)
+		}
+		log.Rank = &rank
+		logs = append(logs, log)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error iterating search results: %w", err)
+	}
+
+	return logs, total, nil
 }

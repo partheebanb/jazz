@@ -117,3 +117,53 @@ func GetLogs(db *database.DB) gin.HandlerFunc {
 		c.JSON(http.StatusOK, response)
 	}
 }
+
+func SearchLogs(db *database.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		projectID, exists := c.Get("project_id")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+
+		var req models.SearchRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Set defaults
+		if req.Limit == 0 {
+			req.Limit = defaultLimit
+		}
+		if req.Limit > maxLimit {
+			req.Limit = maxLimit
+		}
+		if req.Offset < 0 {
+			req.Offset = defaultOffset
+		}
+
+		start := time.Now()
+		ctx := c.Request.Context()
+		logs, total, err := db.SearchLogs(ctx, projectID.(uuid.UUID), req)
+		if err != nil {
+			log.Printf("search error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "search failed",
+			})
+			return
+		}
+		queryTimeMs := time.Since(start).Milliseconds()
+
+		response := models.LogsResponse{
+			Logs:        logs,
+			Total:       total,
+			Limit:       req.Limit,
+			Offset:      req.Offset,
+			HasMore:     int64(req.Offset+req.Limit) < total,
+			QueryTimeMs: &queryTimeMs,
+		}
+
+		c.JSON(http.StatusOK, response)
+	}
+}

@@ -34,7 +34,7 @@ func main() {
 
 	r.GET("/health", handlers.HealthCheck)
 
-	// Public project endpoints (no auth required for creation)
+	// Public project endpoints
 	r.POST("/projects", handlers.CreateProject(db))
 	r.GET("/projects", handlers.ListProjects(db))
 	r.GET("/projects/:id", handlers.GetProject(db))
@@ -46,6 +46,7 @@ func main() {
 	{
 		protected.POST("/logs", handlers.IngestLogs(db))
 		protected.GET("/logs", handlers.GetLogs(db))
+		protected.POST("/search", handlers.SearchLogs(db))
 	}
 
 	log.Println("Server starting on :8080")

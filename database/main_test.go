@@ -29,11 +29,11 @@ func TestMain(m *testing.M) {
 	_, err = conn.Exec(ctx, "CREATE DATABASE jazz_test")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create test database: %v\n", err)
-		conn.Close(ctx)
+		_ = conn.Close(ctx)
 		os.Exit(1)
 	}
 
-	conn.Close(ctx)
+	_ = conn.Close(ctx)
 
 	testDBURL := "postgres://postgres:postgres@localhost:5432/jazz_test?sslmode=disable"
 	testDB, err = SetupTestDB(testDBURL)
@@ -48,8 +48,8 @@ func TestMain(m *testing.M) {
 
 	conn, err = pgx.Connect(ctx, dbURL)
 	if err == nil {
-		conn.Exec(ctx, "DROP DATABASE IF EXISTS jazz_test")
-		conn.Close(ctx)
+		_, _ = conn.Exec(ctx, "DROP DATABASE IF EXISTS jazz_test")
+		_ = conn.Close(ctx)
 	}
 
 	os.Exit(code)

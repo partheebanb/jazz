@@ -10,6 +10,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// GetProjectByAPIKey validates an API key and returns the associated project.
+// Used by authentication middleware to verify requests.
+// Returns error with "invalid API key" message if key not found (safe to expose to client).
+// Returns error with technical details if database fails (log server-side only).
 func (db *DB) GetProjectByAPIKey(ctx context.Context, apiKey string) (*models.Project, error) {
 	query := `
 		SELECT id, name, api_key, created_at, updated_at
@@ -28,6 +32,10 @@ func (db *DB) GetProjectByAPIKey(ctx context.Context, apiKey string) (*models.Pr
 	return project, nil
 }
 
+// CreateProject creates a new project with a generated API key.
+// API key format: "jazz_" + UUID v4 (e.g., "jazz_a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11").
+// API key is returned in plaintext only once - store it securely.
+// Returns the created project with all fields populated, including timestamps.
 func (db *DB) CreateProject(ctx context.Context, name string) (*models.Project, error) {
 	apiKey := generateAPIKey()
 
@@ -46,6 +54,9 @@ func (db *DB) CreateProject(ctx context.Context, name string) (*models.Project, 
 	return project, nil
 }
 
+// ListProjects returns all projects ordered by creation date (newest first).
+// No pagination - suitable for small number of projects (<1000).
+// Returns empty slice (not nil) if no projects exist.
 func (db *DB) ListProjects(ctx context.Context) ([]models.Project, error) {
 	query := `
 		SELECT id, name, api_key, created_at, updated_at
@@ -62,6 +73,9 @@ func (db *DB) ListProjects(ctx context.Context) ([]models.Project, error) {
 	return scanProjects(rows)
 }
 
+// GetProject retrieves a single project by ID.
+// Returns error with "project not found" if ID doesn't exist.
+// Used for project detail views and validation.
 func (db *DB) GetProject(ctx context.Context, projectID uuid.UUID) (*models.Project, error) {
 	query := `
 		SELECT id, name, api_key, created_at, updated_at
@@ -80,6 +94,10 @@ func (db *DB) GetProject(ctx context.Context, projectID uuid.UUID) (*models.Proj
 	return project, nil
 }
 
+// DeleteProject removes a project and all its logs (CASCADE).
+// This is a destructive operation that cannot be undone.
+// Returns error with "project not found" if ID doesn't exist.
+// Logs the deletion for audit trail.
 func (db *DB) DeleteProject(ctx context.Context, projectID uuid.UUID) error {
 	query := `DELETE FROM projects WHERE id = $1`
 

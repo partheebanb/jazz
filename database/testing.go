@@ -13,10 +13,17 @@ var (
 	testDB *DB
 )
 
+// GetTestDB returns the shared test database connection.
+// Available after TestMain has run and SetupTestDB succeeded.
+// Returns nil if called before TestMain.
 func GetTestDB() *DB {
 	return testDB
 }
 
+// SetupTestDB creates a test database connection and runs migrations.
+// Should be called once in TestMain, not in individual tests.
+// Migrations are embedded inline (not read from files) for test isolation.
+// Returns error if connection fails or migrations fail.
 func SetupTestDB(dbURL string) (*DB, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -76,6 +83,10 @@ func runTestMigrations(db *DB) error {
 	return nil
 }
 
+// CleanupTestDB truncates all tables for a fresh test state.
+// Call this at the start of each integration test.
+// Uses CASCADE to handle foreign key dependencies.
+// Fails the test if truncation fails.
 func CleanupTestDB(t *testing.T, db *DB) {
 	t.Helper()
 
@@ -84,6 +95,9 @@ func CleanupTestDB(t *testing.T, db *DB) {
 	require.NoError(t, err)
 }
 
+// TeardownTestDB closes the test database connection.
+// Should be called once in TestMain after all tests complete.
+// Safe to call with nil DB (no-op).
 func TeardownTestDB(db *DB) {
 	if db != nil {
 		db.Close()

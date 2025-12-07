@@ -1,3 +1,5 @@
+// Package handlers implements HTTP request handlers for the Jazz API.
+// All handlers follow the Gin framework pattern and require database access.
 package handlers
 
 import (
@@ -20,10 +22,27 @@ const (
 	defaultOffset = 0
 )
 
+// HealthCheck returns 200 OK with status message.
+// Used by load balancers and monitoring systems to verify the API is running.
+// Does not check database connectivity (see readiness probe for that).
 func HealthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
+// IngestLogs accepts a batch of log entries and stores them in the database.
+// Requires valid API key authentication (project_id in context).
+// Validates batch size (1-1000 logs) and generates UUIDs/timestamps if missing.
+//
+// Request body:
+//
+//	{
+//	  "logs": [
+//	    {"level": "error", "message": "...", "source": "backend"}
+//	  ]
+//	}
+//
+// Returns 201 Created on success, 400 for validation errors, 500 for database errors.
+// All logs in batch are inserted atomically - partial failures are not allowed.
 func IngestLogs(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Get project from auth middleware
@@ -72,6 +91,20 @@ func IngestLogs(db *database.DB) gin.HandlerFunc {
 	}
 }
 
+// GetLogs retrieves logs for the authenticated project with optional filtering.
+// Supports filtering by level, source, time range, pagination, and full-text search.
+// If 'search' parameter is provided, performs full-text search instead of basic query.
+//
+// Query parameters:
+//   - level: filter by log level (exact match)
+//   - source: filter by source (exact match)
+//   - start_time: RFC3339 timestamp (inclusive)
+//   - end_time: RFC3339 timestamp (inclusive)
+//   - limit: max results (default 50, max 1000)
+//   - offset: pagination offset
+//   - search: full-text search query (triggers SearchLogs)
+//
+// Response includes logs array, total count, and has_more flag for pagination.
 func GetLogs(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		projectID, exists := c.Get("project_id")
@@ -118,6 +151,24 @@ func GetLogs(db *database.DB) gin.HandlerFunc {
 	}
 }
 
+// SearchLogs performs full-text search on log messages for the authenticated project.
+// Uses PostgreSQL GIN indexes for fast search across large datasets.
+// Results include relevance ranking and query execution time.
+//
+// Request body:
+//
+//	{
+//	  "query": "database error",
+//	  "level": "error",          // optional
+//	  "source": "backend",        // optional
+//	  "start_time": "...",        // optional
+//	  "end_time": "...",          // optional
+//	  "limit": 50,                // optional
+//	  "offset": 0                 // optional
+//	}
+//
+// Response includes logs with rank field, total count, and query_time_ms.
+// Returns 400 for invalid queries (too short, etc.), 500 for database errors.
 func SearchLogs(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		projectID, exists := c.Get("project_id")

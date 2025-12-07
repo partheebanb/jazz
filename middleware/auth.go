@@ -1,3 +1,5 @@
+// Package middleware provides HTTP middleware for the Jazz API.
+// Currently implements API key authentication and request context enrichment.
 package middleware
 
 import (
@@ -8,6 +10,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// AuthRequired validates the API key and enriches the request context.
+// Extracts "Authorization: Bearer <api_key>" header and validates against database.
+// On success, adds project_id and project to Gin context for use by handlers.
+// On failure, returns 401 Unauthorized and aborts the request chain.
+//
+// Usage:
+//
+//	protected := router.Group("")
+//	protected.Use(middleware.AuthRequired(db))
+//	protected.POST("/logs", handlers.IngestLogs(db))
 func AuthRequired(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")

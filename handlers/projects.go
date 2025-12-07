@@ -10,6 +10,25 @@ import (
 	"github.com/google/uuid"
 )
 
+// CreateProject creates a new project and returns it with a generated API key.
+// API key is shown only once - caller must store it securely.
+// Project name must be 3-255 characters (validated by binding).
+//
+// Request body:
+//
+//	{"name": "My Application"}
+//
+// Response:
+//
+//	{
+//	  "id": "...",
+//	  "name": "My Application",
+//	  "api_key": "jazz_...",
+//	  "created_at": "...",
+//	  "updated_at": "..."
+//	}
+//
+// Returns 201 Created on success, 400 for validation errors, 500 for database errors.
 func CreateProject(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req models.CreateProjectRequest
@@ -37,6 +56,9 @@ func CreateProject(db *database.DB) gin.HandlerFunc {
 	}
 }
 
+// ListProjects returns all projects ordered by creation date (newest first).
+// No authentication required (will be added in Phase 4 with user accounts).
+// Response includes projects array and total count.
 func ListProjects(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
@@ -53,6 +75,9 @@ func ListProjects(db *database.DB) gin.HandlerFunc {
 	}
 }
 
+// GetProject retrieves a single project by ID.
+// No authentication required (will be added in Phase 4 with user accounts).
+// Returns 404 if project doesn't exist, 500 for database errors.
 func GetProject(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		projectIDStr := c.Param("id")
@@ -73,6 +98,7 @@ func GetProject(db *database.DB) gin.HandlerFunc {
 	}
 }
 
+// DeleteProject removes a project and all its logs (CASCADE).
 func DeleteProject(db *database.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		projectIDStr := c.Param("id")

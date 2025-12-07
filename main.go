@@ -1,3 +1,4 @@
+// Package main provides the Jazz logging service API server.
 package main
 
 import (
@@ -14,7 +15,7 @@ import (
 )
 
 func main() {
-	godotenv.Load()
+	_ = godotenv.Load()
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -50,5 +51,5 @@ func main() {
 	}
 
 	log.Println("Server starting on :8080")
-	r.Run(":8080")
+	log.Fatal(r.Run(":8080"))
 }

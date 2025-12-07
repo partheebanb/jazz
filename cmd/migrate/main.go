@@ -1,3 +1,5 @@
+// Package main provides a database migration tool for Jazz.
+// It reads SQL migration files from database/migrations/ and applies them in order.
 package main
 
 import (
@@ -13,7 +15,7 @@ import (
 )
 
 func main() {
-	godotenv.Load()
+	_ = godotenv.Load()
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -24,7 +26,8 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}
-	defer conn.Close(context.Background())
+
+	defer func() { _ = conn.Close(context.Background()) }()
 
 	migrationsDir := "./database/migrations"
 	files, err := os.ReadDir(migrationsDir)

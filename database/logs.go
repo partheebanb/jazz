@@ -16,6 +16,8 @@ const (
 	maxLimit     = 1000
 )
 
+// BatchInsertError indicates which log failed during batch insert.
+// Contains the index of the failed log and the total batch size for debugging.
 type BatchInsertError struct {
 	FailedIndex int
 	TotalLogs   int
@@ -26,6 +28,11 @@ func (e *BatchInsertError) Error() string {
 	return fmt.Sprintf("failed to insert log at index %d/%d: %v", e.FailedIndex, e.TotalLogs, e.Err)
 }
 
+// InsertLogsBatch inserts multiple log entries atomically using pgx batching.
+// All logs are inserted in a single network round-trip for performance.
+// If any log fails, returns BatchInsertError indicating which log failed.
+// Empty slice is a no-op and returns nil.
+// All logs must belong to the same project (not enforced, caller's responsibility).
 func (db *DB) InsertLogsBatch(ctx context.Context, logs []models.LogEntry) error {
 	if len(logs) == 0 {
 		return nil
@@ -48,7 +55,9 @@ func (db *DB) InsertLogsBatch(ctx context.Context, logs []models.LogEntry) error
 	}
 
 	results := db.Pool.SendBatch(ctx, batch)
-	defer results.Close()
+	defer func() {
+		_ = results.Close()
+	}()
 
 	for i := 0; i < len(logs); i++ {
 		_, err := results.Exec()
@@ -64,6 +73,19 @@ func (db *DB) InsertLogsBatch(ctx context.Context, logs []models.LogEntry) error
 	return nil
 }
 
+// QueryLogs retrieves logs for a project with optional filtering and pagination.
+// If params.Search is provided, delegates to SearchLogs for full-text search.
+// Uses COUNT(*) OVER() window function to get total count in single query.
+// Returns logs ordered by timestamp DESC (newest first), total count, and any error.
+//
+// Filters applied:
+//   - Level: exact match (e.g., "error", "info")
+//   - Source: exact match (e.g., "backend", "frontend")
+//   - StartTime/EndTime: inclusive timestamp range (RFC3339 format)
+//   - Limit: max results (default 50, max 1000)
+//   - Offset: pagination offset (default 0)
+//
+// Returns empty slice (not nil) if no logs match.
 func (db *DB) QueryLogs(ctx context.Context, projectID uuid.UUID, params models.QueryParams) ([]models.LogEntry, int64, error) {
 	start := time.Now()
 	defer func() {

@@ -1,0 +1,40 @@
+version: 2
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - ineffassign
+    - unused
+    - misspell
+    - revive
+    - bodyclose
+    - noctx
+    - sqlclosecheck
+    - unconvert
+    - unparam
+    - whitespace
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+run:
+  timeout: 5m
+  tests: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+        disabled: false
+  
+  errcheck:
+    check-blank: true
